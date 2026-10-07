@@ -1,0 +1,38 @@
+package eu.kanade.tachiyomi.animeextension.en.anikura
+
+import android.app.Activity
+import android.content.Intent
+import android.os.Bundle
+import android.util.Log
+import kotlin.system.exitProcess
+
+/**
+ * Handles `https://anikura.club/...` intents by handing the URL to Anikku's
+ * ANIMESEARCH action.
+ */
+class UrlActivity : Activity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val intentData = intent?.data?.toString()
+        if (intentData != null) {
+            val mainIntent = Intent().apply {
+                action = "eu.kanade.tachiyomi.ANIMESEARCH"
+                putExtra("query", intentData)
+                putExtra("filter", packageName)
+            }
+            try {
+                startActivity(mainIntent)
+            } catch (e: Throwable) {
+                Log.e(TAG, e.toString())
+            }
+        } else {
+            Log.e(TAG, "could not parse uri from intent $intent")
+        }
+        finish()
+        exitProcess(0)
+    }
+
+    companion object {
+        private const val TAG = "AnikuraUrl"
+    }
+}
