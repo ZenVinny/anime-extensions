@@ -69,12 +69,7 @@ class LatestEpisodeDto(
     }
 }
 
-/**
- * The nested `anime` object on the detail page.
- *
- * `episodes` on this object is a string count, not an array — intentionally
- * not modelled here.
- */
+// `episodes` on this object is a string count, not an array.
 @Serializable
 class AnimeCoreDto(
     val id: Int,
@@ -109,10 +104,7 @@ class AnimeHeroPropsDto(
     val anime: AnimeCoreDto,
 )
 
-/**
- * `EpisodeList` props. The auxiliary maps are keyed by episode number as a
- * string. Only [episodeThumbnails] and [episodeDescriptions] are consumed.
- */
+// `episodeThumbnails` and `episodeDescriptions` are keyed by episode number.
 @Serializable
 class EpisodeListPropsDto(
     val episodes: List<EpisodeDto> = emptyList(),
@@ -149,21 +141,11 @@ class EpisodeDto(
     }
 }
 
-/**
- * Response of `/api/watch/streams`: the catalog of providers for an episode.
- * A provider can appear here without having a stream — see
- * [SourceResponseDto] for the definitive per-provider fetch.
- */
 @Serializable
 class StreamsResponseDto(
     val streams: List<StreamDto> = emptyList(),
 )
 
-/**
- * Response of `/api/watch/sources?id=X&ep=N&lang=sub&provider=X`.
- *
- * `stream` is null when the provider has nothing for the episode.
- */
 @Serializable
 class SourceResponseDto(
     val stream: StreamDto? = null,

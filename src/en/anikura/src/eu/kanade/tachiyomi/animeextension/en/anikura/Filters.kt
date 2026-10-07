@@ -3,14 +3,6 @@ package eu.kanade.tachiyomi.animeextension.en.anikura
 import eu.kanade.tachiyomi.animesource.model.AnimeFilter
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
 
-/**
- * Verified against the /browse URL params emitted by the site's shared
- * `78632` module: sort, status, q. Status ids come from the site's own
- * `13067` module.
- *
- * Year filtering is deliberately omitted — `AnimeFilter.Text` is abstract in
- * this SDK and cannot be instantiated directly.
- */
 object Filters {
 
     val FILTER_LIST get() = AnimeFilterList(

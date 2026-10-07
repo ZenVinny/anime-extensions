@@ -6,10 +6,6 @@ import android.os.Bundle
 import android.util.Log
 import kotlin.system.exitProcess
 
-/**
- * Handles `https://anikura.club/...` intents by handing the URL to Anikku's
- * ANIMESEARCH action.
- */
 class UrlActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

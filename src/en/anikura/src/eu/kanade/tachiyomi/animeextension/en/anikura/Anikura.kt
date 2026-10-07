@@ -31,29 +31,18 @@ import okhttp3.Request
 import okhttp3.Response
 
 /**
- * Anikura (anikura.club) source.
+ * Watch flow:
+ *  - `/api/watch/streams` lists every provider for an episode, but is a
+ *    catalog only — a provider can appear there without having a stream.
+ *  - `/api/watch/sources?provider=<id>` returns the actual stream, or
+ *    `{"stream": null}` when the provider has nothing for the episode.
  *
- * Watch flow uses two endpoints:
+ * Provider ids: first `-`-delimited segment of the stream id + `:1`.
+ * `kaa-native-sub` → `kaa:1`; `megaplay-native-sub-172352` → `megaplay:1`.
  *
- *  - `/api/watch/streams?id=X&ep=N&lang=sub|dub` lists every registered
- *    provider for an episode. It is a catalog: a provider can appear here
- *    but have no actual stream for this episode.
- *  - `/api/watch/sources?id=X&ep=N&lang=sub|dub&provider=<id>` fetches a
- *    single provider's stream, returning `{"stream": null}` when none
- *    exists.
- *
- * Verified on anime 8384 ep 2: `sources?provider=megaplay:1` returns null
- * while `sources?provider=kaa:1` returns a real stream, so the catalog is
- * queried per provider before being offered to the player.
- *
- * Provider ids: the first `-`-delimited segment of the stream id plus the
- * `:1` suffix the site uses. `kaa-native-sub` → `kaa:1`;
- * `megaplay-native-sub-172352` → `megaplay:1`.
- *
- * The proxy `s=` signature on every URL expires in ~10 minutes, so videos
- * are marked `initialized = true` and [resolveVideo] re-fetches
- * `/api/watch/sources` right before playback, refreshing both the video URL
- * and the subtitle tracks.
+ * Proxy `s=` signatures expire in ~10 minutes, so videos are marked
+ * `initialized = true` and [resolveVideo] re-fetches the source right before
+ * playback.
  */
 class Anikura :
     AnimeHttpSource(),
@@ -409,12 +398,9 @@ private fun org.jsoup.nodes.Document.extractHeroAnime(): AnimeCoreDto {
     return hero.anime
 }
 
-/**
- * The same top-level shape (`episodes` + `hasDub` + `episodeThumbnails`) is
- * emitted twice — once as the Suspense fallback (placeholders, no metadata),
- * once as the resolved list. The predicate rejects the fallback by requiring
- * real data: any auxiliary map populated, or a non-generic title.
- */
+// The same top-level shape is emitted twice — as the Suspense fallback
+// (placeholder rows, no metadata) and as the resolved list. The predicate
+// rejects the fallback by requiring auxiliary data or a non-generic title.
 private fun org.jsoup.nodes.Document.extractEpisodeList(): EpisodeListPayload {
     val props = extractNextJs<EpisodeListPropsDto> { el ->
         val obj = el as? JsonObject ?: return@extractNextJs false
