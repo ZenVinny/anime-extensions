@@ -3,7 +3,6 @@ package eu.kanade.tachiyomi.animeextension.en.anikura
 import android.content.SharedPreferences
 import android.util.Log
 import androidx.preference.ListPreference
-import androidx.preference.MultiSelectListPreference
 import androidx.preference.PreferenceScreen
 import eu.kanade.tachiyomi.animesource.ConfigurableAnimeSource
 import eu.kanade.tachiyomi.animesource.model.AnimeFilterList
@@ -20,6 +19,7 @@ import keiyoushi.utils.extractNextJs
 import keiyoushi.utils.getPreferencesLazy
 import keiyoushi.utils.parseAs
 import keiyoushi.utils.toJsonString
+import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -31,18 +31,16 @@ import okhttp3.Request
 import okhttp3.Response
 
 /**
- * Watch flow:
- *  - `/api/watch/streams` lists every provider for an episode, but is a
- *    catalog only — a provider can appear there without having a stream.
- *  - `/api/watch/sources?provider=<id>` returns the actual stream, or
- *    `{"stream": null}` when the provider has nothing for the episode.
+ * `/api/watch/streams` lists every provider for an episode but is a catalog
+ * only — a provider can appear there without having a stream.
+ * `/api/watch/sources?provider=<id>` returns the actual stream, or
+ * `{"stream": null}` when the provider has nothing.
  *
- * Provider ids: first `-`-delimited segment of the stream id + `:1`.
- * `kaa-native-sub` → `kaa:1`; `megaplay-native-sub-172352` → `megaplay:1`.
+ * Provider ids are the first `-`-delimited segment of the stream id + `:1`
+ * (`kaa-native-sub` → `kaa:1`).
  *
- * Proxy `s=` signatures expire in ~10 minutes, so videos are marked
- * `initialized = true` and [resolveVideo] re-fetches the source right before
- * playback.
+ * Proxy `s=` signatures expire in ~10 minutes, so [getHosterList] returns
+ * videos uninitialized and [resolveVideo] re-fetches the source at playback.
  */
 class Anikura :
     AnimeHttpSource(),
@@ -57,9 +55,6 @@ class Anikura :
 
     private val preferredServer: String
         get() = preferences.getString(PREF_SERVER_KEY, PREF_SERVER_DEFAULT) ?: PREF_SERVER_DEFAULT
-
-    private val excludedServers: Set<String>
-        get() = preferences.getStringSet(PREF_SERVER_EXCLUDE_KEY, emptySet()) ?: emptySet()
 
     private val streamHeaders: Headers
         get() = headers.newBuilder()
@@ -84,10 +79,9 @@ class Anikura :
 
     override fun popularAnimeParse(response: Response): AnimesPage {
         val body = response.parseAs<BrowsePageDto>()
-        val items = body.items
         val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
-        val hasNextPage = items.isNotEmpty() && currentPage < MAX_PAGES
-        return AnimesPage(items.map { it.toSAnime(baseUrl) }, hasNextPage)
+        val hasNextPage = body.items.isNotEmpty() && currentPage < MAX_PAGES
+        return AnimesPage(body.items.map { it.toSAnime(baseUrl) }, hasNextPage)
     }
 
     override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/", headers)
@@ -99,12 +93,23 @@ class Anikura :
         return AnimesPage(row.episodes.map { it.toSAnime(baseUrl) }, false)
     }
 
-    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
-        val maybeUrl = query.toHttpUrlOrNull()
-        if (maybeUrl != null && maybeUrl.host == baseUrl.toHttpUrl().host) {
-            return GET(maybeUrl, headers)
+    override suspend fun getSearchAnime(
+        page: Int,
+        query: String,
+        filters: AnimeFilterList,
+    ): AnimesPage {
+        val url = query.toHttpUrlOrNull()
+        if (url != null && isAnikuraHost(url.host)) {
+            val segments = url.pathSegments
+            if (segments.size >= 3 && segments[0] == "anime") {
+                val response = client.get(url, headers)
+                return AnimesPage(listOf(animeDetailsParse(response)), false)
+            }
         }
+        return super.getSearchAnime(page, query, filters)
+    }
 
+    override fun searchAnimeRequest(page: Int, query: String, filters: AnimeFilterList): Request {
         val url = "$baseUrl/api/browse/page".toHttpUrl().newBuilder().apply {
             addQueryParameter("page", page.toString())
             if (query.isNotBlank()) addQueryParameter("q", query)
@@ -126,10 +131,9 @@ class Anikura :
 
     override fun searchAnimeParse(response: Response): AnimesPage {
         val body = response.parseAs<BrowsePageDto>()
-        val items = body.items
         val currentPage = response.request.url.queryParameter("page")?.toIntOrNull() ?: 1
-        val hasNextPage = items.isNotEmpty() && currentPage < MAX_PAGES
-        return AnimesPage(items.map { it.toSAnime(baseUrl) }, hasNextPage)
+        val hasNextPage = body.items.isNotEmpty() && currentPage < MAX_PAGES
+        return AnimesPage(body.items.map { it.toSAnime(baseUrl) }, hasNextPage)
     }
 
     override fun getFilterList(): AnimeFilterList = Filters.FILTER_LIST
@@ -180,37 +184,33 @@ class Anikura :
         val catalog = try {
             client.get(streamsUrl, streamHeaders).parseAs<StreamsResponseDto>().streams
                 .filter { it.url.isNotBlank() && it.embedUrl.isNullOrBlank() }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "streams fetch failed", e)
             return emptyList()
         }
 
-        if (catalog.isEmpty()) return emptyList()
-
-        val excluded = excludedServers
-        val videos = mutableListOf<Pair<String, Video>>()
-        for (stream in catalog) {
-            val provider = providerIdOf(stream) ?: continue
-            val serverName = serverNameOf(stream) ?: continue
-            if (serverName in excluded) continue
-            val video = fetchSource(info, provider, referer) ?: continue
-            videos.add(serverName to video)
+        val streams = catalog.mapNotNull { stream ->
+            val provider = providerIdOf(stream) ?: return@mapNotNull null
+            val serverName = serverNameOf(stream) ?: return@mapNotNull null
+            val fetched = fetchSource(info, provider, referer, initialize = false) ?: return@mapNotNull null
+            ServerStream(serverName, fetched.first, fetched.second)
         }
 
-        if (videos.isEmpty()) return emptyList()
+        if (streams.isEmpty()) return emptyList()
 
-        val preferred = preferredServer
-        val ordered = if (preferred.isBlank()) {
-            videos.sortedBy { (_, video) -> if (video.videoUrl.contains(PREFERRED_HOST)) 0 else 1 }
+        val ordered = if (preferredServer.isBlank()) {
+            streams.sortedBy { if (it.url.contains(PREFERRED_HOST)) 0 else 1 }
         } else {
-            videos.sortedByDescending { (serverName, _) -> serverName == preferred }
+            streams.sortedByDescending { it.serverName == preferredServer }
         }
 
         return listOf(
             Hoster(
                 hosterUrl = "anikura",
                 hosterName = "Anikura",
-                videoList = ordered.map { it.second },
+                videoList = ordered.map { it.video },
             ),
         )
     }
@@ -226,7 +226,8 @@ class Anikura :
         }
 
         val info = EpisodeUrlInfo(key.animeId, key.episode, key.lang)
-        val resolved = fetchSource(info, key.provider, key.referer) ?: return null
+        val resolved = fetchSource(info, key.provider, key.referer, initialize = true)?.second
+            ?: return null
         return resolved.copy(
             videoTitle = video.videoTitle.ifBlank { resolved.videoTitle },
             internalData = video.internalData,
@@ -237,7 +238,8 @@ class Anikura :
         info: EpisodeUrlInfo,
         provider: String,
         referer: String,
-    ): Video? {
+        initialize: Boolean,
+    ): Pair<String, Video>? {
         val url = "$baseUrl/api/watch/sources".toHttpUrl().newBuilder()
             .addQueryParameter("id", info.animeId)
             .addQueryParameter("ep", info.episode.toString())
@@ -247,6 +249,8 @@ class Anikura :
 
         val stream = try {
             client.get(url, streamHeaders).parseAs<SourceResponseDto>().stream
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Log.w(TAG, "sources fetch failed for $provider", e)
             return null
@@ -262,12 +266,12 @@ class Anikura :
 
         val absoluteUrl = if (stream.url.startsWith("/")) "$baseUrl${stream.url}" else stream.url
 
-        return Video(
-            videoUrl = absoluteUrl,
+        val video = Video(
+            videoUrl = if (initialize) absoluteUrl else "",
             videoTitle = stream.label,
             headers = videoHeaders,
-            subtitleTracks = stream.toSubtitleTracks(baseUrl),
-            initialized = true,
+            subtitleTracks = if (initialize) stream.toSubtitleTracks(baseUrl) else emptyList(),
+            initialized = initialize,
             internalData = ResolveKey(
                 animeId = info.animeId,
                 episode = info.episode,
@@ -276,6 +280,8 @@ class Anikura :
                 referer = referer,
             ).toJsonString(),
         )
+
+        return absoluteUrl to video
     }
 
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
@@ -287,22 +293,17 @@ class Anikura :
             setDefaultValue(PREF_SERVER_DEFAULT)
             summary = "%s"
         }.also(screen::addPreference)
+    }
 
-        MultiSelectListPreference(screen.context).apply {
-            key = PREF_SERVER_EXCLUDE_KEY
-            title = PREF_SERVER_EXCLUDE_TITLE
-            entries = PREF_SERVER_EXCLUDE_ENTRIES
-            entryValues = PREF_SERVER_EXCLUDE_ENTRIES
-            setDefaultValue(emptySet<String>())
-            summary = PREF_SERVER_EXCLUDE_SUMMARY
-        }.also(screen::addPreference)
+    private fun isAnikuraHost(host: String): Boolean {
+        val baseHost = baseUrl.toHttpUrl().host
+        return host == baseHost || host == baseHost.removePrefix("www.")
     }
 
     private fun serverNameOf(stream: StreamDto): String? {
-        when {
-            stream.id.startsWith("megaplay") -> return "AniKoto"
-            stream.id.startsWith("kaa") -> return "KAA"
-        }
+        // megaplay streams advertise a manifest with no video segments.
+        if (stream.id.startsWith("megaplay")) return null
+        if (stream.id.startsWith("kaa")) return "KAA"
         return stream.label.substringBefore(" ·").trim().ifBlank { null }
     }
 
@@ -323,6 +324,12 @@ class Anikura :
         val lang: String,
     )
 
+    private class ServerStream(
+        val serverName: String,
+        val url: String,
+        val video: Video,
+    )
+
     private fun parseEpisodeUrl(url: String): EpisodeUrlInfo? {
         val match = EPISODE_URL_REGEX.find(url) ?: return null
         return EpisodeUrlInfo(
@@ -341,14 +348,9 @@ class Anikura :
 
         private const val PREF_SERVER_KEY = "preferred_server"
         private const val PREF_SERVER_TITLE = "Preferred server"
-        private const val PREF_SERVER_DEFAULT = ""
-        private val PREF_SERVER_ENTRIES = arrayOf("Auto", "AniKoto", "KAA")
-        private val PREF_SERVER_VALUES = arrayOf("", "AniKoto", "KAA")
-
-        private const val PREF_SERVER_EXCLUDE_KEY = "excluded_servers"
-        private const val PREF_SERVER_EXCLUDE_TITLE = "Exclude servers"
-        private val PREF_SERVER_EXCLUDE_ENTRIES = arrayOf("AniKoto", "KAA")
-        private const val PREF_SERVER_EXCLUDE_SUMMARY = "Hide videos from the selected servers."
+        private const val PREF_SERVER_DEFAULT = "KAA"
+        private val PREF_SERVER_ENTRIES = arrayOf("Auto", "KAA")
+        private val PREF_SERVER_VALUES = arrayOf("", "KAA")
     }
 }
 
@@ -364,8 +366,7 @@ private fun org.jsoup.nodes.Document.parseHomeRows(): List<AnimeRowDto> {
     try {
         val latest = extractNextJs<AnimeRowDto> { el ->
             val obj = el as? JsonObject ?: return@extractNextJs false
-            val eps = obj["episodes"] as? JsonArray ?: return@extractNextJs false
-            eps.isNotEmpty()
+            (obj["episodes"] as? JsonArray)?.isNotEmpty() == true
         }
         if (latest != null) rows += latest
     } catch (_: Exception) {
@@ -399,44 +400,48 @@ private fun org.jsoup.nodes.Document.extractHeroAnime(): AnimeCoreDto {
 }
 
 // The same top-level shape is emitted twice — as the Suspense fallback
-// (placeholder rows, no metadata) and as the resolved list. The predicate
-// rejects the fallback by requiring auxiliary data or a non-generic title.
+// (placeholder rows, no metadata) and as the resolved list. Prefer the
+// richer payload via a strict predicate, but fall back to any payload
+// that has episodes so generic-titled lists are not dropped.
 private fun org.jsoup.nodes.Document.extractEpisodeList(): EpisodeListPayload {
-    val props = extractNextJs<EpisodeListPropsDto> { el ->
-        val obj = el as? JsonObject ?: return@extractNextJs false
-
-        if (!obj.containsKey("hasDub") || !obj.containsKey("episodeThumbnails")) {
-            return@extractNextJs false
-        }
-
-        val eps = obj["episodes"] as? JsonArray ?: return@extractNextJs false
-        if (eps.isEmpty()) return@extractNextJs false
-
-        if (eps.size > 1) {
-            val hasAuxData =
-                (obj["episodeThumbnails"] as? JsonObject)?.isNotEmpty() == true ||
-                    (obj["episodeDescriptions"] as? JsonObject)?.isNotEmpty() == true ||
-                    (obj["episodeDurations"] as? JsonObject)?.isNotEmpty() == true
-
-            val hasRealTitle = eps.any { ep ->
-                val eo = ep as? JsonObject ?: return@any false
-                val t = (eo["title"] as? JsonPrimitive)?.content ?: return@any false
-                val n = (eo["number"] as? JsonPrimitive)?.content
-                t.isNotBlank() && t != "Episode $n"
-            }
-
-            return@extractNextJs hasAuxData || hasRealTitle
-        }
-
-        val first = eps.first() as? JsonObject ?: return@extractNextJs false
-        val title = (first["title"] as? JsonPrimitive)?.content ?: return@extractNextJs false
-        val number = (first["number"] as? JsonPrimitive)?.content ?: return@extractNextJs false
-        title != "Episode $number"
-    }
-
+    val props = findEpisodeListProps(strict = true) ?: findEpisodeListProps(strict = false)
     return EpisodeListPayload(
         episodes = props?.episodes ?: emptyList(),
         thumbnails = props?.episodeThumbnails ?: emptyMap(),
         descriptions = props?.episodeDescriptions ?: emptyMap(),
     )
+}
+
+private fun org.jsoup.nodes.Document.findEpisodeListProps(strict: Boolean): EpisodeListPropsDto? = extractNextJs<EpisodeListPropsDto> { el ->
+    val obj = el as? JsonObject ?: return@extractNextJs false
+
+    if (!obj.containsKey("hasDub") || !obj.containsKey("episodeThumbnails")) {
+        return@extractNextJs false
+    }
+
+    val eps = obj["episodes"] as? JsonArray ?: return@extractNextJs false
+    if (eps.isEmpty()) return@extractNextJs false
+
+    if (!strict) return@extractNextJs true
+
+    if (eps.size > 1) {
+        val hasAuxData =
+            (obj["episodeThumbnails"] as? JsonObject)?.isNotEmpty() == true ||
+                (obj["episodeDescriptions"] as? JsonObject)?.isNotEmpty() == true ||
+                (obj["episodeDurations"] as? JsonObject)?.isNotEmpty() == true
+
+        val hasRealTitle = eps.any { ep ->
+            val eo = ep as? JsonObject ?: return@any false
+            val t = (eo["title"] as? JsonPrimitive)?.content ?: return@any false
+            val n = (eo["number"] as? JsonPrimitive)?.content
+            t.isNotBlank() && t != "Episode $n"
+        }
+
+        hasAuxData || hasRealTitle
+    } else {
+        val first = eps.first() as? JsonObject ?: return@extractNextJs false
+        val title = (first["title"] as? JsonPrimitive)?.content ?: return@extractNextJs false
+        val number = (first["number"] as? JsonPrimitive)?.content ?: return@extractNextJs false
+        title != "Episode $number"
+    }
 }

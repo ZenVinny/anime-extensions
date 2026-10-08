@@ -22,16 +22,11 @@ class AnimeItemDto(
         val anime = SAnime.create()
         anime.url = "$id/$slug"
         anime.title = title
-        anime.thumbnail_url = poster.absolute(baseUrl)
-            ?: backgroundImage.absolute(baseUrl)
+        anime.thumbnail_url = poster.absolute(baseUrl) ?: backgroundImage.absolute(baseUrl)
         anime.description = description?.replace(TAG_REGEX, "")?.trim()
         anime.genre = (termsByType?.genre ?: genres).joinToString()
         anime.status = parseStatus(status)
         return anime
-    }
-
-    companion object {
-        private val TAG_REGEX = Regex("<[^>]+>")
     }
 }
 
@@ -63,8 +58,7 @@ class LatestEpisodeDto(
         val anime = SAnime.create()
         anime.url = "$catalogId/$slug"
         anime.title = seriesTitle
-        anime.thumbnail_url = poster.absolute(baseUrl)
-            ?: banner.absolute(baseUrl)
+        anime.thumbnail_url = poster.absolute(baseUrl) ?: banner.absolute(baseUrl)
         return anime
     }
 }
@@ -86,16 +80,11 @@ class AnimeCoreDto(
         val anime = SAnime.create()
         anime.url = "$id/$slug"
         anime.title = title
-        anime.thumbnail_url = poster.absolute(baseUrl)
-            ?: backgroundImage.absolute(baseUrl)
+        anime.thumbnail_url = poster.absolute(baseUrl) ?: backgroundImage.absolute(baseUrl)
         anime.description = description?.replace(TAG_REGEX, "")?.trim()
         anime.genre = (termsByType?.genre ?: genres).joinToString()
         anime.status = parseStatus(status)
         return anime
-    }
-
-    companion object {
-        private val TAG_REGEX = Regex("<[^>]+>")
     }
 }
 
@@ -173,6 +162,8 @@ class SubtitleDto(
     val url: String,
 )
 
+private val TAG_REGEX = Regex("<[^>]+>")
+
 private fun String?.absolute(baseUrl: String): String? {
     val trimmed = this?.trim().orEmpty()
     if (trimmed.isEmpty()) return null
@@ -184,7 +175,6 @@ private fun parseStatus(raw: String?): Int {
     return when {
         s.contains("currently") || s == "releasing" -> SAnime.ONGOING
         s.contains("finished") -> SAnime.COMPLETED
-        s.contains("not yet") -> SAnime.ONGOING
         else -> SAnime.UNKNOWN
     }
 }
